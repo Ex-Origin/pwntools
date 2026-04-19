@@ -6,6 +6,35 @@ from .context import context
 from .packing import p32, p64
 
 
+def _de_bruijn(alphabet: bytes, n: int) -> bytes:
+    k = len(alphabet)
+    a = [0] * (k * n)
+    sequence = bytearray()
+
+    def db(t: int, p: int) -> None:
+        if t > n:
+            if n % p == 0:
+                for index in a[1 : p + 1]:
+                    sequence.append(alphabet[index])
+            return
+
+        a[t] = a[t - p]
+        db(t + 1, p)
+
+        for j in range(a[t - p] + 1, k):
+            a[t] = j
+            db(t + 1, t)
+
+    db(1, 1)
+    return bytes(sequence)
+
+
+_CYCLIC_CHARSET = b"abcdefghijklmnopqrstuvwxyz"
+_CYCLIC_SUBSEQUENCE_SIZE = 4
+_CYCLIC_MAX_LENGTH = len(_CYCLIC_CHARSET) ** _CYCLIC_SUBSEQUENCE_SIZE
+_CYCLIC_PATTERN = _de_bruijn(_CYCLIC_CHARSET, _CYCLIC_SUBSEQUENCE_SIZE)
+
+
 def cyclic(length: int) -> bytes:
     length = int(length)
     if length < 0:
@@ -13,21 +42,13 @@ def cyclic(length: int) -> bytes:
     if length == 0:
         return b""
 
-    charset = b"abcdefghijklmnopqrstuvwxyz"
-    pattern = bytearray()
+    if length > _CYCLIC_MAX_LENGTH:
+        raise ValueError(
+            "cyclic() length exceeds the unique de Bruijn sequence size "
+            f"for alphabet={len(_CYCLIC_CHARSET)} and n={_CYCLIC_SUBSEQUENCE_SIZE}"
+        )
 
-    for d in charset:
-        for c in charset:
-            for b in charset:
-                for a in charset:
-                    pattern.extend((a, b, c, d))
-                    if len(pattern) >= length:
-                        return bytes(pattern[:length])
-
-    repeated = bytearray()
-    while len(repeated) < length:
-        repeated.extend(pattern)
-    return bytes(repeated[:length])
+    return _CYCLIC_PATTERN[:length]
 
 
 def _pack_int(value: int) -> bytes:

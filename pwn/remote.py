@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+import ipaddress
 import os
 import queue
 import select
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -70,6 +72,20 @@ def _set_tcp_nodelay(sock: Optional[socket.socket]) -> None:
         pass
 
 
+def _default_server_hostname(host: str, sni: bool) -> Optional[str]:
+    if not sni:
+        return None
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    return None
+
+
+def _create_default_ssl_context() -> ssl.SSLContext:
+    return ssl._create_unverified_context()
+
+
 def _coerce_bytes(data) -> bytes:
     if isinstance(data, bytes):
         return data
@@ -123,11 +139,30 @@ class RemoteConnection:
 
     def __init__(self, host: str, port: int, *args, **kwargs) -> None:
         timeout = kwargs.pop("timeout", None)
+        ssl_enabled = kwargs.pop("ssl", False)
+        ssl_context = kwargs.pop("ssl_context", None)
+        server_hostname = kwargs.pop("server_hostname", None)
+        sni = kwargs.pop("sni", True)
+
+        if isinstance(ssl_enabled, ssl.SSLContext) and ssl_context is None:
+            ssl_context = ssl_enabled
+            ssl_enabled = True
+
         self.host = host
         self.port = int(port)
         self._closed = False
+        self._ssl_enabled = bool(ssl_enabled or ssl_context is not None)
+        self._ssl_context = ssl_context if ssl_context is not None else None
+        self._server_hostname = (
+            server_hostname
+            if server_hostname is not None
+            else _default_server_hostname(self.host, bool(sni))
+        )
         log.info(f"Opening connection to {self.host} on port {self.port}")
-        self._initialize_socket_state(self._open_socket(timeout=timeout))
+        sock = self._open_socket(timeout=timeout)
+        if self._ssl_enabled:
+            sock = self._wrap_socket_with_ssl(sock, timeout=timeout)
+        self._initialize_socket_state(sock)
         log.success(f"Opening connection to {self.host} on port {self.port}: Done")
 
     def _initialize_socket_state(self, sock: Optional[socket.socket]) -> None:
@@ -188,6 +223,16 @@ class RemoteConnection:
                 return None
             try:
                 chunk = self._socket.recv(4096)
+            except ssl.SSLWantReadError:
+                continue
+            except ssl.SSLWantWriteError:
+                if not self._wait_for_socket(
+                    writable=True,
+                    stop_event=stop_event,
+                    deadline=deadline,
+                ):
+                    return None
+                continue
             except BlockingIOError:
                 continue
             except OSError as exc:
@@ -207,6 +252,12 @@ class RemoteConnection:
                 raise EOFError("remote connection closed while sending data")
             try:
                 sent = self._socket.send(view[total_sent:])
+            except ssl.SSLWantReadError:
+                if not self._wait_for_socket_data():
+                    raise EOFError("remote connection closed while sending data")
+                continue
+            except ssl.SSLWantWriteError:
+                continue
             except BlockingIOError:
                 continue
             except OSError as exc:
@@ -245,6 +296,33 @@ class RemoteConnection:
         if last_error is None:
             raise OSError(f"failed to connect to {self.host}:{self.port}")
         raise last_error
+
+    def _wrap_socket_with_ssl(self, sock: socket.socket, timeout=None) -> ssl.SSLSocket:
+        deadline = self._deadline_from_timeout(timeout)
+        context = self._ssl_context if self._ssl_context is not None else _create_default_ssl_context()
+
+        try:
+            # Keep the connection in non-blocking mode after the TLS handshake.
+            ssl_sock = context.wrap_socket(
+                sock,
+                server_hostname=self._server_hostname,
+                do_handshake_on_connect=False,
+            )
+            ssl_sock.setblocking(False)
+            while True:
+                try:
+                    ssl_sock.do_handshake()
+                    return ssl_sock
+                except ssl.SSLWantReadError:
+                    self._wait_for_socket(sock=ssl_sock, readable=True, deadline=deadline)
+                except ssl.SSLWantWriteError:
+                    self._wait_for_socket(sock=ssl_sock, writable=True, deadline=deadline)
+        except KeyboardInterrupt:
+            sock.close()
+            raise
+        except BaseException:
+            sock.close()
+            raise
 
     def _resolve_addresses(self, deadline: Optional[float]):
         outcome = {}
@@ -298,8 +376,12 @@ class RemoteConnection:
     ) -> bool:
         return self._wait_for_socket(readable=True, stop_event=stop_event, deadline=deadline)
 
-    def _wait_for_socket_writable(self, stop_event: Optional[threading.Event] = None) -> bool:
-        return self._wait_for_socket(writable=True, stop_event=stop_event)
+    def _wait_for_socket_writable(
+        self,
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+    ) -> bool:
+        return self._wait_for_socket(writable=True, stop_event=stop_event, deadline=deadline)
 
     def _wait_for_socket(
         self,

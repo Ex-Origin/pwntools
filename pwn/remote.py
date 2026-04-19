@@ -43,6 +43,33 @@ _SEND_EOF_ERRNOS = _RECV_EOF_ERRNOS | {
 }
 
 
+def _normalize_socket_family(fam) -> int:
+    if fam in (None, "any", "all", socket.AF_UNSPEC):
+        return socket.AF_UNSPEC
+    if fam in ("ipv4", "ip4", "inet", socket.AF_INET):
+        return socket.AF_INET
+    if fam in ("ipv6", "ip6", "inet6", socket.AF_INET6):
+        return socket.AF_INET6
+    raise ValueError(f"unsupported socket family: {fam!r}")
+
+
+def _normalize_socket_type(typ) -> int:
+    if typ in (None, "tcp", "stream", socket.SOCK_STREAM):
+        return socket.SOCK_STREAM
+    if typ in ("udp", "dgram", socket.SOCK_DGRAM):
+        return socket.SOCK_DGRAM
+    raise ValueError(f"unsupported socket type: {typ!r}")
+
+
+def _set_tcp_nodelay(sock: Optional[socket.socket]) -> None:
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (AttributeError, OSError):
+        pass
+
+
 def _coerce_bytes(data) -> bytes:
     if isinstance(data, bytes):
         return data
@@ -100,8 +127,13 @@ class RemoteConnection:
         self.port = int(port)
         self._closed = False
         log.info(f"Opening connection to {self.host} on port {self.port}")
-        self._socket = self._open_socket(timeout=timeout)
-        self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._initialize_socket_state(self._open_socket(timeout=timeout))
+        log.success(f"Opening connection to {self.host} on port {self.port}: Done")
+
+    def _initialize_socket_state(self, sock: Optional[socket.socket]) -> None:
+        self._closed = False
+        self._socket = sock
+        _set_tcp_nodelay(sock)
         self._buffer = bytearray()
         self._interactive_input_buffer = bytearray()
         self._interactive_input_eof = False
@@ -109,20 +141,26 @@ class RemoteConnection:
         self._interactive_input_thread: Optional[threading.Thread] = None
         self._recv_lock = threading.Lock()
         self._send_lock = threading.Lock()
-        log.success(f"Opening connection to {self.host} on port {self.port}: Done")
+
+    def _ensure_connected(self) -> None:
+        return None
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        sock = getattr(self, "_socket", None)
         try:
-            self._socket.shutdown(socket.SHUT_RDWR)
+            if sock is not None:
+                sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
-        self._socket.close()
+        if sock is not None:
+            sock.close()
         log.info(f"Closed connection to {self.host} port {self.port}")
 
     def send(self, data) -> int:
+        self._ensure_connected()
         payload = _coerce_bytes(data)
         with self._send_lock:
             self._send_all(payload)
@@ -144,6 +182,7 @@ class RemoteConnection:
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
     ) -> Optional[bytes]:
+        self._ensure_connected()
         while True:
             if not self._wait_for_socket_data(stop_event=stop_event, deadline=deadline):
                 return None
@@ -373,6 +412,7 @@ class RemoteConnection:
         return self.sendline(data)
 
     def interactive(self) -> None:
+        self._ensure_connected()
         stop_event = threading.Event()
         self._interactive_input_buffer.clear()
         self._interactive_input_eof = False

@@ -18,6 +18,7 @@ setup(
     author="windows-testcases contributors",
     license="MIT",
     packages=find_packages(),
+    package_data={"pwn": ["*.pyi", "py.typed"]},
     python_requires=">=3.8",
     install_requires=[],
     classifiers=[

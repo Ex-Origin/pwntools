@@ -9,6 +9,7 @@ Implemented features:
 - `from pwn import *`
 - `context.clear(...)`
 - `remote(...)`
+- `listen(...)`
 - `send`, `sendline`, `sendafter`, `sendlineafter`
 - `recv`, `recvn`, `recvline`, `recvuntil`
 - `interactive`
@@ -38,4 +39,14 @@ context.clear(arch="amd64", os="windows", log_level="debug")
 io = remote("127.0.0.1", 31337)
 io.sendline(cyclic(32) + p64(0x4141414141414141))
 io.interactive()
+```
+
+Reverse shell style listener:
+
+```python
+from pwn import *
+
+context.clear(arch="amd64", os="windows", log_level="debug")
+sh = listen(12001)
+sh.interactive()
 ```

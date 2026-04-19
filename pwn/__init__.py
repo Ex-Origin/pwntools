@@ -5,6 +5,7 @@ Only the subset needed by the current testcase `exp.py` files is exported.
 """
 
 from .context import context
+from .listen import listen
 from .log import info, log, success
 from .packing import p32, p64, u32, u64
 from .payloads import cyclic, flat
@@ -17,6 +18,7 @@ __all__ = [
     "context",
     "log",
     "remote",
+    "listen",
     "p32",
     "p64",
     "u32",

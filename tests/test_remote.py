@@ -7,6 +7,8 @@ import time
 import unittest
 from unittest import mock
 
+import pwn
+from pwn.listen import listen
 from pwn.remote import RemoteConnection, remote
 
 
@@ -304,6 +306,66 @@ class RemoteConnectionTests(unittest.TestCase):
                             io.interactive()
 
         io.send.assert_called_once_with(b"whoami\n")
+        self.assertTrue(io._closed)
+
+    def test_listen_is_exported_from_package(self):
+        self.assertIn("listen", pwn.__all__)
+        self.assertIs(pwn.listen, listen)
+
+    def test_listen_wait_for_connection_returns_self(self):
+        io = listen(0, bindaddr="127.0.0.1")
+        client = socket.create_connection(("127.0.0.1", io.lport))
+
+        try:
+            self.assertIs(io.wait_for_connection(), io)
+            io.sendline(b"hello")
+            self.assertEqual(client.recv(1024), b"hello\n")
+            self.assertEqual(io.rhost, "127.0.0.1")
+            self.assertIsInstance(io.rport, int)
+        finally:
+            client.close()
+            io.close()
+
+    def test_listen_recvline_waits_for_incoming_connection(self):
+        io = listen(0, bindaddr="127.0.0.1")
+
+        def client():
+            connection = socket.create_connection(("127.0.0.1", io.lport))
+            try:
+                connection.sendall(b"reverse-shell\n")
+            finally:
+                connection.close()
+
+        thread = threading.Thread(target=client, daemon=True)
+        thread.start()
+        try:
+            self.assertEqual(io.recvline(), b"reverse-shell\n")
+        finally:
+            io.close()
+            thread.join(timeout=1.0)
+
+    def test_listen_interactive_waits_for_connection(self):
+        io = listen(0, bindaddr="127.0.0.1")
+        io._read_interactive_input = mock.Mock(return_value=None)
+
+        def client():
+            connection = socket.create_connection(("127.0.0.1", io.lport))
+            try:
+                connection.sendall(b"hello from client\n")
+                connection.shutdown(socket.SHUT_WR)
+            finally:
+                connection.close()
+
+        thread = threading.Thread(target=client, daemon=True)
+        thread.start()
+        try:
+            with mock.patch("sys.stdout", new_callable=text_io.StringIO) as stdout:
+                io.interactive()
+            self.assertIn("hello from client", stdout.getvalue())
+        finally:
+            io.close()
+            thread.join(timeout=1.0)
+
         self.assertTrue(io._closed)
 
 
